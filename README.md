@@ -123,7 +123,20 @@ commit abc1234 ──► pipeline (run #N) ──► imágenes minibiblioteca-*:
 
 ## 6. Orquestación y escalabilidad
 
-**Elección: Docker Compose.** _(Justificación técnica del equipo: escribir aquí por qué se eligió Compose y no Kubernetes para este escenario.)_
+**Elección: Docker Compose.**
+
+Datos medidos para la decisión:
+
+| Recurso | Valor |
+|---|---|
+| RAM de la EC2 (t3.micro, Learner Lab) | 913 MiB + 1 GiB de swap |
+| Consumo por réplica del backend (`docker stats`) | ~115 MiB |
+| Consumo del frontend Nginx | ~12 MiB |
+
+> **Justificación técnica (redactar por el equipo, sin IA).** Preguntas guía:
+> - ¿Cuánta memoria necesita un clúster Kubernetes mínimo (control plane + kubelet) comparado con la que tiene esta EC2?
+> - ¿Qué capacidades de orquestación pide la pauta (réplicas, balanceo, recuperación, límites) y cuáles cubre Compose en este proyecto?
+> - ¿En qué escenario (cantidad de servicios, nodos, tráfico) sí convendría migrar a Kubernetes?
 
 | Característica | Cómo se implementa |
 |---|---|
@@ -185,39 +198,114 @@ APP_VERSION=local APP_PORT=8088 docker compose down
 
 **Activar además:**
 - Settings → Code security → **Dependabot alerts** y **Dependabot security updates**.
-- La EC2 se prepara una sola vez con `bash deploy/prepare-ec2.sh` (ver la guía del laboratorio).
+- Settings → Secrets and variables → **Dependabot**: duplicar `SNYK_TOKEN` y `SONAR_TOKEN`. GitHub no entrega los secrets de Actions a los PRs que abre Dependabot.
+- SonarQube Cloud → Administration → Analysis Method: **Automatic Analysis desactivado**. El análisis lo hace el pipeline.
+
+**EC2 (AWS Academy Learner Lab):**
+
+| Elemento | Configuración |
+|---|---|
+| AMI / tipo | Amazon Linux 2023 · t3.micro (913 MiB RAM) |
+| Grupo de seguridad (entrada) | SSH 22/TCP y HTTP 80/TCP desde `0.0.0.0/0`. **8080 no se abre** |
+| Preparación (una sola vez) | `bash deploy/prepare-ec2.sh`: Docker, Compose v5.6.1, 1 GiB de swap, `/opt/minibiblioteca` y la marca `.bootstrap-ready` |
+
+> En Learner Lab la IP pública cambia cada vez que se reinicia el laboratorio: hay que actualizar el secret `AWS_HOST`.
 
 ---
 
-## 9. Evidencias
+## 9. Incidentes detectados y corregidos
 
-_(Agregar capturas: pipeline en verde, Pull Request con deploy Skipped, resumen de pruebas y cobertura, Quality Gate de SonarQube, reporte de Trivy, Issue de alerta, aplicación funcionando en la EC2.)_
+Problemas reales que el pipeline detectó durante el desarrollo. Ninguno llegó a producción: cada barrera detuvo el flujo hasta que se corrigió.
+
+| # | Barrera que lo detectó | Problema | Corrección | Evidencia |
+|---|---|---|---|---|
+| 1 | Snyk (job 1) | Primer push a `main` sin `SNYK_TOKEN` configurado: el análisis no pudo ejecutarse y el pipeline se bloqueó | Configuración de Secrets y Variables | [Run bloqueado](https://github.com/SebaEscobar4/MiniBiblioteca-DevSecOps/actions/runs/41002471295) · [Issue #1](https://github.com/SebaEscobar4/MiniBiblioteca-DevSecOps/issues/1) creado por el job de alerta |
+| 2 | Snyk (job 1) | Vulnerabilidad **Critical** `SNYK-JAVA-TOOLSJACKSONCORE-21761838` (Deserialization of Untrusted Data) en `tools.jackson.core:jackson-databind 3.1.7`, transitiva desde `spring-boot-starter-web 4.1.2` | Se fuerza `jackson-bom.version=3.1.8` en `backend/pom.xml`; se verificó `jackson-databind-3.1.8.jar` dentro del JAR | [PR bloqueado](https://github.com/SebaEscobar4/MiniBiblioteca-DevSecOps/actions/runs/41006858252) → [PR en verde](https://github.com/SebaEscobar4/MiniBiblioteca-DevSecOps/actions/runs/41007448820) |
+| 3 | Concurrencia del workflow | Todos los runs compartían un grupo de concurrencia y se cancelaban entre sí (PRs de Dependabot cancelados) | Un grupo por rama y un grupo exclusivo, no cancelable, para el deploy | [PR #9](https://github.com/SebaEscobar4/MiniBiblioteca-DevSecOps/pull/9) |
+| 4 | Dependabot | Propuso saltar de Java 21 (LTS) a Java 24/26/27 en las imágenes base | Regla `ignore` para versiones mayores de Java; los PRs #2, #4 y #10 se cierran sin merge | `.github/dependabot.yml` |
+| 5 | Preparación de la EC2 | `prepare-ec2.sh` fallaba en Amazon Linux 2023: conflicto entre `curl` y `curl-minimal` preinstalado | Se instala solo `docker tar gzip`; `curl-minimal` ya provee el comando | Commit `ad0b4e8` |
+| 6 | Deploy (job 5) | `upload-artifact@v4` omite archivos ocultos: el `.env` no llegaba a la EC2 y `scp` terminaba con código 255. Los contenedores en ejecución no se tocaron | `include-hidden-files: true`; además, el job de alerta ahora también vigila el deploy | [Deploy fallido](https://github.com/SebaEscobar4/MiniBiblioteca-DevSecOps/actions/runs/41010107919) → [Deploy exitoso](https://github.com/SebaEscobar4/MiniBiblioteca-DevSecOps/actions/runs/41011465143) · [PR #11](https://github.com/SebaEscobar4/MiniBiblioteca-DevSecOps/pull/11) |
 
 ---
 
-## 10. Uso de Inteligencia Artificial
+## 10. Evidencias
+
+### Resultado del despliegue verificado
+
+Run [41011465143](https://github.com/SebaEscobar4/MiniBiblioteca-DevSecOps/actions/runs/41011465143): los 5 jobs en verde. Verificación externa:
+
+| Comprobación | Resultado |
+|---|---|
+| `GET /` | HTTP 200 |
+| `GET /api/health` | `{"status":"UP"}` |
+| `GET /api/resumen` | `{"total":4,"disponibles":3}` |
+| `GET /api/libros/999` | HTTP 404 |
+| `GET /version.txt` | `f247d55cbe9096fca756414451e2d5b87a2b5834` (= commit del merge) |
+| Puerto 8080 desde Internet | Cerrado |
+| Bitácora en la EC2 | `2026-10-30T06:05:12Z commit=f247d55… actor=SebaEscobar4 run=…/41011465143` |
+
+### Capturas por indicador
+
+Guardar las imágenes en `docs/evidencias/` con estos nombres y enlazarlas aquí.
+
+| IE | Captura | Nombre sugerido |
+|---|---|---|
+| IE1 | `docker images` mostrando las imágenes `minibiblioteca-*:<sha>` y su tamaño | `ie1-imagenes.png` |
+| IE1 | Dockerfile multi-stage (las dos etapas) | `ie1-dockerfile.png` |
+| IE2 | Summary del job 2: tabla de pruebas y cobertura | `ie2-pruebas-cobertura.png` |
+| IE2 | Reporte HTML de JaCoCo (`index.html`) | `ie2-jacoco.png` |
+| IE2 | SonarQube Cloud: Quality Gate **Passed** | `ie2-sonar-quality-gate.png` |
+| IE3 | Job de Snyk bloqueado con la CVE Critical de jackson-databind | `ie3-snyk-bloqueo.png` |
+| IE3 | El mismo PR en verde después de la corrección | `ie3-snyk-corregido.png` |
+| IE3 | Issue #1 creado automáticamente por el job de alerta | `ie3-alerta-issue.png` |
+| IE3 | Summary de Trivy con el umbral de bloqueo | `ie3-trivy.png` |
+| IE3 | PRs abiertos por Dependabot | `ie3-dependabot.png` |
+| IE4 | Pipeline completo en verde (vista del grafo de jobs) | `ie4-pipeline-verde.png` |
+| IE4 | PR con *Deploy AWS EC2 → Skipped* | `ie4-pr-deploy-skipped.png` |
+| IE4 | Summary del deploy (commit, autor, imágenes) | `ie4-resumen-deploy.png` |
+| IE4 | Pestaña **Deployments** / environment `production` | `ie4-deployments.png` |
+| IE4 | Navegador en `http://IP/` y `http://IP/version.txt` | `ie4-app-publicada.png` |
+| IE5 | `docker compose ps` en la EC2 con ambos contenedores `healthy` | `ie5-compose-ps.png` |
+| IE5 | Smoke test del job 4 con "Balanceo correcto: 2 réplicas" | `ie5-balanceo.png` |
+| IE5 | `docker stats` con el consumo de memoria por contenedor | `ie5-recursos.png` |
+
+---
+
+## 11. Uso de Inteligencia Artificial
 
 _(Revisar y ajustar esta declaración antes de entregar. Citar según https://bibliotecas.duoc.cl/ia)_
 
 Se utilizó **Claude (Anthropic)**, mediante Claude Code, como apoyo para:
 - Mejorar el Dockerfile (capas, healthcheck y etiquetas de trazabilidad).
 - Escribir pruebas adicionales (`LibroControllerTest`, `LibroRepositoryMemoriaTest`) y la regla de cobertura mínima.
-- Agregar al pipeline el escaneo con Trivy, los resúmenes, la verificación de versión y el job de alerta.
-- Configurar réplicas y balanceo en Docker Compose y Nginx.
+- Agregar al pipeline el escaneo con Trivy, los resúmenes, la verificación de versión y los jobs de alerta.
+- Configurar réplicas, balanceo y tolerancia a fallos en Docker Compose y Nginx.
+- Diagnosticar y corregir los incidentes de la sección 9 (vulnerabilidad de Jackson, concurrencia, script de la EC2, `.env` del deploy).
+- Guiar la configuración de Snyk, SonarQube Cloud, GitHub Secrets y la instancia EC2.
 - Redactar la parte descriptiva de este README.
 
 Todo el contenido generado fue revisado, ejecutado y validado por el equipo. Las conclusiones, las justificaciones técnicas y las reflexiones individuales fueron redactadas por los integrantes **sin apoyo de IA**.
 
 ---
 
-## 11. Conclusiones
+## 12. Conclusiones
 
-_(Redactar por el equipo, sin IA.)_
+> **Redactar por el equipo, sin IA.** Preguntas guía:
+> - ¿Qué riesgo concreto habría llegado a producción sin cada barrera del pipeline? Usen los incidentes de la sección 9 como ejemplo.
+> - ¿Por qué el orden Snyk → pruebas → Sonar → Docker → deploy, y no otro?
+> - ¿Qué limitaciones tiene la solución (repositorio en memoria, una sola EC2, IP dinámica del Learner Lab) y cómo las mejorarían?
+> - ¿Qué cambiarían si este microservicio fuera a producción real?
+
+_(Texto del equipo.)_
 
 ### Reflexión individual - _(nombre 1)_
 
-_(Aprendizaje y contribución al proyecto, redactado sin IA.)_
+> Preguntas guía: ¿Qué aprendiste que no sabías antes del encargo? ¿Qué parte hiciste tú? ¿Qué te costó más y cómo lo resolviste?
+
+_(Texto propio, sin IA.)_
 
 ### Reflexión individual - _(nombre 2)_
 
-_(Aprendizaje y contribución al proyecto, redactado sin IA.)_
+> Preguntas guía: ¿Qué aprendiste que no sabías antes del encargo? ¿Qué parte hiciste tú? ¿Qué te costó más y cómo lo resolviste?
+
+_(Texto propio, sin IA.)_
