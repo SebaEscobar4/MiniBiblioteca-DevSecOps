@@ -46,6 +46,13 @@ updates:
     labels: ["dependencias", "docker"]
     commit-message:
       prefix: "deps(docker)"
+    # Java 21 es la versión LTS del proyecto: no proponer saltos a Java 22+.
+    # Sí se aceptan parches de la misma versión (21.0.x).
+    ignore:
+      - dependency-name: "eclipse-temurin"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "maven"
+        versions: [">= 3.11"]
 
   - package-ecosystem: "docker"
     directory: "/frontend"

@@ -9,9 +9,11 @@ on:
 permissions:
   contents: read
 
+# Un grupo por rama/PR: si se sube un commit nuevo al mismo PR, el run
+# anterior (ya obsoleto) se cancela. Runs de ramas distintas no se pisan.
 concurrency:
-  group: minibiblioteca-production
-  cancel-in-progress: true
+  group: minibiblioteca-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # ==========================================================
@@ -406,6 +408,11 @@ jobs:
     # pestaña "Deployments" del repositorio: historial de qué commit se
     # desplegó, cuándo y quién lo provocó.
     environment: production
+    # Solo un despliegue a la vez en la EC2, y nunca se interrumpe a medias:
+    # si llega otro, espera su turno.
+    concurrency:
+      group: minibiblioteca-deploy-production
+      cancel-in-progress: false
 
     steps:
       - name: Descargar paquete construido

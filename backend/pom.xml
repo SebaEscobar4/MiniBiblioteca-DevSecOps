@@ -20,6 +20,15 @@
     <properties>
         <java.version>21</java.version>
         <jacoco.version>0.8.13</jacoco.version>
+        <!--
+        Remediación de seguridad detectada por Snyk:
+        SNYK-JAVA-TOOLSJACKSONCORE-21761838 (Critical, Deserialization of
+        Untrusted Data) en jackson-databind 3.1.7, que llega de forma
+        transitiva por spring-boot-starter-web 4.1.2. Se fuerza el parche
+        3.1.8 sobrescribiendo la propiedad que usa el BOM de Spring Boot.
+        Quitar cuando Spring Boot incluya una versión corregida.
+        -->
+        <jackson-bom.version>3.1.8</jackson-bom.version>
     </properties>
 
     <dependencies>

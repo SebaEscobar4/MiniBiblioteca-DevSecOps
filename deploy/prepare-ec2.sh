@@ -6,7 +6,9 @@ COMPOSE_VERSION="v5.6.1"
 
 echo "=== 1. Actualizar metadatos e instalar herramientas ==="
 sudo yum makecache -y
-sudo yum install -y docker curl tar gzip
+# Amazon Linux 2023 ya trae curl-minimal (provee el comando curl);
+# instalar el paquete "curl" completo genera un conflicto de paquetes.
+sudo yum install -y docker tar gzip
 
 echo "=== 2. Habilitar Docker ==="
 sudo systemctl enable docker
