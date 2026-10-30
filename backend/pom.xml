@@ -19,7 +19,7 @@
 
     <properties>
         <java.version>21</java.version>
-        <jacoco.version>0.8.13</jacoco.version>
+        <jacoco.version>0.8.16</jacoco.version>
         <!--
         Remediación de seguridad detectada por Snyk:
         SNYK-JAVA-TOOLSJACKSONCORE-21761838 (Critical, Deserialization of
