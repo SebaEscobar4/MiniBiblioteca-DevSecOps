@@ -393,6 +393,9 @@ jobs:
           name: minibiblioteca-deploy
           path: deploy-package/
           if-no-files-found: error
+          # upload-artifact v4 omite los archivos ocultos por defecto; sin
+          # esto el .env (APP_VERSION, APP_PORT, BACKEND_REPLICAS) no viaja.
+          include-hidden-files: true
 
   # ==========================================================
   # CD - DESPLIEGUE LIVIANO EN EC2
@@ -555,7 +558,7 @@ jobs:
   # queda abierto hasta que alguien corrija el problema y lo cierre.
   alerta_seguridad:
     name: Alerta - Pipeline bloqueado
-    needs: [seguridad_snyk, pruebas, sonarcloud, docker]
+    needs: [seguridad_snyk, pruebas, sonarcloud, docker, deploy]
     if: failure() && github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
@@ -570,6 +573,7 @@ jobs:
           PRUEBAS: ${{ needs.pruebas.result }}
           SONAR: ${{ needs.sonarcloud.result }}
           DOCKER: ${{ needs.docker.result }}
+          DEPLOY: ${{ needs.deploy.result }}
         run: |
           gh label create seguridad --color B60205 \
             --description "Alerta automática del pipeline" --force
@@ -588,6 +592,7 @@ jobs:
           | 2. JUnit + JaCoCo | $PRUEBAS |
           | 3. SonarQube Quality Gate | $SONAR |
           | 4. Trivy + smoke test | $DOCKER |
+          | 5. Deploy EC2 | $DEPLOY |
 
           - Autor del cambio: @$GITHUB_ACTOR
           - Detalle y reportes: $RUN_URL
