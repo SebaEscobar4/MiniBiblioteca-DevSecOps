@@ -51,8 +51,10 @@ updates:
     ignore:
       - dependency-name: "eclipse-temurin"
         update-types: ["version-update:semver-major"]
+      # La imagen de Maven solo se usa para compilar con Java 21; Dependabot
+      # cambia el sufijo de la etiqueta (temurin-21 -> 26/27), así que se
+      # actualiza a mano junto con la versión de Java del proyecto.
       - dependency-name: "maven"
-        versions: [">= 3.11"]
 
   - package-ecosystem: "docker"
     directory: "/frontend"
