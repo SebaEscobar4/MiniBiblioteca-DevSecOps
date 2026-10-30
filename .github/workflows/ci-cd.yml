@@ -77,7 +77,7 @@ jobs:
 
       - name: Publicar reporte Snyk
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: snyk-report
           path: snyk-report.json
@@ -150,7 +150,7 @@ jobs:
         run: mvn -B -f backend/pom.xml clean verify
 
       - name: Publicar reporte JaCoCo
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: jacoco-backend
           path: backend/target/site/jacoco/
@@ -160,7 +160,7 @@ jobs:
       # incluso si alguna prueba falla.
       - name: Publicar resultados de pruebas
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: surefire-reports
           path: backend/target/surefire-reports/
@@ -313,7 +313,7 @@ jobs:
 
       - name: Publicar reportes Trivy
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: trivy-reports
           path: trivy-reports/
@@ -386,7 +386,7 @@ jobs:
           printf 'APP_VERSION=%s\nAPP_PORT=80\nBACKEND_REPLICAS=1\n' "$GITHUB_SHA" > deploy-package/.env
 
       - name: Publicar paquete de despliegue
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: minibiblioteca-deploy
           path: deploy-package/
