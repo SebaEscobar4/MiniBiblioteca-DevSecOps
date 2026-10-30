@@ -23,7 +23,7 @@ RUN java -Djarmode=tools -jar target/minibiblioteca-backend-0.0.1-SNAPSHOT.jar \
 # ETAPA 2 - RUNTIME
 # Solo contiene Java Runtime + aplicación terminada.
 # ============================================================
-FROM eclipse-temurin:21-jre-alpine
+FROM eclipse-temurin:24-jre-alpine
 
 # Trazabilidad: el pipeline envía el SHA del commit y la fecha.
 ARG APP_VERSION=local
