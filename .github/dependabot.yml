@@ -1,0 +1,57 @@
+# ============================================================
+# DEPENDABOT - ACTUALIZACIÓN AUTOMÁTICA DE DEPENDENCIAS
+# ============================================================
+# Cada lunes revisa si hay versiones nuevas y abre un Pull Request.
+# Ese PR pasa por el pipeline completo (Snyk, pruebas, Sonar, Trivy)
+# antes de poder fusionarse: una actualización nunca entra sin validar.
+#
+# Además, con "Dependabot alerts" y "Dependabot security updates"
+# activados en Settings > Code security, GitHub alerta y abre un PR
+# apenas se publica una CVE que afecte al proyecto (sin esperar al lunes).
+# ============================================================
+version: 2
+
+updates:
+  # Dependencias Java del backend (Spring Boot, JUnit, etc.).
+  - package-ecosystem: "maven"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels: ["dependencias", "java"]
+    commit-message:
+      prefix: "deps(maven)"
+    # Las actualizaciones menores y de parche llegan juntas en un solo PR.
+    groups:
+      maven-menores:
+        update-types: ["minor", "patch"]
+
+  # Versiones de las actions usadas en el workflow.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels: ["dependencias", "ci"]
+    commit-message:
+      prefix: "deps(actions)"
+
+  # Imágenes base de los Dockerfile (Maven, Temurin, Nginx).
+  - package-ecosystem: "docker"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels: ["dependencias", "docker"]
+    commit-message:
+      prefix: "deps(docker)"
+
+  - package-ecosystem: "docker"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels: ["dependencias", "docker"]
+    commit-message:
+      prefix: "deps(docker)"

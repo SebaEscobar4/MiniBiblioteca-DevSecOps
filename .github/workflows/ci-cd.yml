@@ -1,0 +1,590 @@
+name: MiniBiblioteca DevSecOps CI-CD
+
+on:
+  pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: minibiblioteca-production
+  cancel-in-progress: true
+
+jobs:
+  # ==========================================================
+  # CI 0 - SNYK / SOFTWARE COMPOSITION ANALYSIS
+  # ==========================================================
+  seguridad_snyk:
+    name: 1. Snyk - Dependencias
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar código
+        uses: actions/checkout@v4
+
+      - name: Configurar Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+          cache-dependency-path: backend/pom.xml
+
+      - name: Instalar Snyk CLI
+        run: npm install -g snyk
+
+      - name: Preparar dependencias Maven
+        run: mvn -B -f backend/pom.xml -DskipTests dependency:go-offline
+
+      - name: Analizar dependencias
+        id: snyk_scan
+        shell: bash
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+          # Parámetro de seguridad: severidad mínima que bloquea el pipeline.
+          # Se cambia sin tocar el código creando la Repository Variable
+          # SNYK_SEVERITY_THRESHOLD (low | medium | high | critical).
+          SNYK_THRESHOLD: ${{ vars.SNYK_SEVERITY_THRESHOLD || 'critical' }}
+        run: |
+          test -n "$SNYK_TOKEN" || { echo "Falta el secret SNYK_TOKEN"; exit 2; }
+          set +e
+
+          snyk test \
+            --file=backend/pom.xml \
+            --package-manager=maven \
+            --severity-threshold="$SNYK_THRESHOLD" \
+            --json-file-output=snyk-report.json
+
+          SNYK_EXIT_CODE=$?
+          echo "exit_code=$SNYK_EXIT_CODE" >> "$GITHUB_OUTPUT"
+          set -e
+
+          if [ "$SNYK_EXIT_CODE" -eq 0 ]; then
+            echo "Snyk: sin vulnerabilidades Critical."
+            exit 0
+          fi
+
+          if [ "$SNYK_EXIT_CODE" -eq 1 ]; then
+            echo "Snyk: se detectó al menos una vulnerabilidad Critical."
+            exit 0
+          fi
+
+          echo "Snyk terminó con un error técnico: $SNYK_EXIT_CODE"
+          exit "$SNYK_EXIT_CODE"
+
+      - name: Publicar reporte Snyk
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: snyk-report
+          path: snyk-report.json
+          if-no-files-found: warn
+
+      # Resumen visible en la página del pipeline: cuántas vulnerabilidades
+      # hay por severidad, aunque no alcancen el umbral de bloqueo.
+      - name: Resumen de vulnerabilidades
+        if: always()
+        shell: bash
+        env:
+          SNYK_THRESHOLD: ${{ vars.SNYK_SEVERITY_THRESHOLD || 'critical' }}
+        run: |
+          {
+            echo "## Snyk - dependencias Maven"
+            echo "Umbral de bloqueo: **$SNYK_THRESHOLD**"
+            if [ -f snyk-report.json ]; then
+              echo
+              echo "| Critical | High | Medium | Low |"
+              echo "|---|---|---|---|"
+              jq -r '[.vulnerabilities // [] | .[] | .severity] as $s
+                | "| \($s | map(select(.=="critical")) | length) | \($s | map(select(.=="high")) | length) | \($s | map(select(.=="medium")) | length) | \($s | map(select(.=="low")) | length) |"' snyk-report.json
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Aplicar Security Gate
+        if: steps.snyk_scan.outputs.exit_code == '1'
+        run: |
+          echo "SECURITY GATE BLOQUEADO: vulnerabilidad igual o superior al umbral."
+          echo "Descarga el artifact snyk-report para ver la dependencia y la versión corregida."
+          exit 1
+
+      # Monitoreo continuo: Snyk guarda una foto de las dependencias de main
+      # y envía alertas por correo si después se publica una CVE nueva que
+      # las afecte, aunque nadie vuelva a ejecutar el pipeline.
+      - name: Registrar monitoreo continuo en Snyk
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          snyk monitor \
+            --file=backend/pom.xml \
+            --package-manager=maven \
+            --project-name=minibiblioteca-backend \
+            --target-reference=main
+
+  # ==========================================================
+  # CI 1 - JUNIT + MOCKITO + JACOCO
+  # ==========================================================
+  pruebas:
+    name: 2. JUnit Mockito y JaCoCo
+    needs: seguridad_snyk
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar código
+        uses: actions/checkout@v4
+
+      - name: Configurar Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+          cache-dependency-path: backend/pom.xml
+
+      # verify ejecuta las pruebas, genera JaCoCo y aplica el mínimo de 80%
+      # de cobertura definido en el pom.xml. Si algo falla, el job falla.
+      - name: Ejecutar pruebas y generar cobertura
+        run: mvn -B -f backend/pom.xml clean verify
+
+      - name: Publicar reporte JaCoCo
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-backend
+          path: backend/target/site/jacoco/
+          if-no-files-found: error
+
+      # Evidencia de las pruebas: los XML de Surefire quedan descargables
+      # incluso si alguna prueba falla.
+      - name: Publicar resultados de pruebas
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports
+          path: backend/target/surefire-reports/
+          if-no-files-found: warn
+
+      - name: Resumen de pruebas y cobertura
+        if: always()
+        shell: bash
+        run: |
+          REPORTES=backend/target/surefire-reports
+          CSV=backend/target/site/jacoco/jacoco.csv
+          {
+            echo "## Pruebas unitarias y cobertura"
+            if ls "$REPORTES"/TEST-*.xml >/dev/null 2>&1; then
+              TOTAL=$(grep -ho 'tests="[0-9]*"' "$REPORTES"/TEST-*.xml | grep -o '[0-9]*' | paste -sd+ | bc)
+              FALLAS=$(grep -ho 'failures="[0-9]*"' "$REPORTES"/TEST-*.xml | grep -o '[0-9]*' | paste -sd+ | bc)
+              ERRORES=$(grep -ho 'errors="[0-9]*"' "$REPORTES"/TEST-*.xml | grep -o '[0-9]*' | paste -sd+ | bc)
+              echo "| Pruebas | Fallidas | Errores |"
+              echo "|---|---|---|"
+              echo "| $TOTAL | $FALLAS | $ERRORES |"
+            fi
+            if [ -f "$CSV" ]; then
+              # Columnas 8 y 9 del CSV de JaCoCo: líneas no cubiertas / cubiertas.
+              awk -F, 'NR>1 {m+=$8; c+=$9} END {printf "\n**Cobertura de líneas:** %.1f%% (mínimo exigido: 80%%)\n", 100*c/(c+m)}' "$CSV"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ==========================================================
+  # CI 2 - SONARQUBE CLOUD / QUALITY GATE
+  # ==========================================================
+  sonarcloud:
+    name: 3. SonarQube Cloud
+    needs: pruebas
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar código
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configurar Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+          cache-dependency-path: backend/pom.xml
+
+      - name: Descargar reporte JaCoCo
+        uses: actions/download-artifact@v4
+        with:
+          name: jacoco-backend
+          path: backend/target/site/jacoco/
+
+      - name: Compilar clases para el análisis
+        run: mvn -B -f backend/pom.xml -DskipTests package
+
+      - name: Validar configuración SonarQube Cloud
+        shell: bash
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_PROJECT_KEY: ${{ vars.SONAR_PROJECT_KEY }}
+          SONAR_ORGANIZATION: ${{ vars.SONAR_ORGANIZATION }}
+        run: |
+          test -n "$SONAR_TOKEN" || { echo "Falta SONAR_TOKEN"; exit 1; }
+          test -n "$SONAR_PROJECT_KEY" || { echo "Falta SONAR_PROJECT_KEY"; exit 1; }
+          test -n "$SONAR_ORGANIZATION" || { echo "Falta SONAR_ORGANIZATION"; exit 1; }
+
+      - name: Ejecutar SonarQube Cloud y esperar Quality Gate
+        working-directory: backend
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_PROJECT_KEY: ${{ vars.SONAR_PROJECT_KEY }}
+          SONAR_ORGANIZATION: ${{ vars.SONAR_ORGANIZATION }}
+        run: |
+          mvn -B \
+            org.sonarsource.scanner.maven:sonar-maven-plugin:5.8.0.7211:sonar \
+            -Dsonar.projectKey="$SONAR_PROJECT_KEY" \
+            -Dsonar.projectName="MiniBiblioteca DevSecOps" \
+            -Dsonar.organization="$SONAR_ORGANIZATION" \
+            -Dsonar.host.url=https://sonarcloud.io \
+            -Dsonar.token="$SONAR_TOKEN" \
+            -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml \
+            -Dsonar.qualitygate.wait=true
+
+  # ==========================================================
+  # CI 3 - BUILD DE IMÁGENES Y SMOKE TEST
+  # El trabajo pesado se hace en GitHub, NO en EC2.
+  # ==========================================================
+  docker:
+    name: 4. Docker Compose y Smoke Test
+    needs: sonarcloud
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar código
+        uses: actions/checkout@v4
+
+      - name: Validar Docker Compose
+        run: APP_VERSION="$GITHUB_SHA" APP_PORT=18080 docker compose config
+
+      - name: Construir imágenes en GitHub Actions
+        run: APP_VERSION="$GITHUB_SHA" docker compose build
+
+      # Security Gate de contenedores: Snyk revisa solo las dependencias
+      # Maven; Trivy revisa la imagen completa (Alpine, Java, Nginx, JARs).
+      # --ignore-unfixed: solo cuenta CVEs que ya tienen parche disponible.
+      - name: Escanear imágenes con Trivy
+        id: trivy
+        shell: bash
+        env:
+          # Severidades que bloquean (Repository Variable opcional).
+          TRIVY_SEVERITY: ${{ vars.TRIVY_SEVERITY || 'CRITICAL' }}
+        run: |
+          mkdir -p trivy-reports
+          BLOQUEO=0
+          for IMG in backend frontend; do
+            # Reporte completo (HIGH y CRITICAL) como evidencia.
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+              aquasec/trivy:0.76.1 image --quiet --scanners vuln \
+              --severity HIGH,CRITICAL --ignore-unfixed --format table \
+              "minibiblioteca-$IMG:$GITHUB_SHA" > "trivy-reports/$IMG.txt"
+
+            # Gate: falla solo con las severidades configuradas.
+            if ! docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+              aquasec/trivy:0.76.1 image --quiet --scanners vuln \
+              --severity "$TRIVY_SEVERITY" --ignore-unfixed --exit-code 1 \
+              "minibiblioteca-$IMG:$GITHUB_SHA" > /dev/null; then
+              echo "Trivy: minibiblioteca-$IMG tiene vulnerabilidades $TRIVY_SEVERITY con parche."
+              BLOQUEO=1
+            fi
+          done
+
+          {
+            echo "## Trivy - imágenes de contenedor"
+            echo "Umbral de bloqueo: **$TRIVY_SEVERITY**"
+            for IMG in backend frontend; do
+              echo "### $IMG"
+              echo '```'
+              cat "trivy-reports/$IMG.txt"
+              echo '```'
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$BLOQUEO" -eq 1 ]; then
+            echo "SECURITY GATE BLOQUEADO: imagen vulnerable, no se despliega."
+            exit 1
+          fi
+
+      - name: Publicar reportes Trivy
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-reports
+          path: trivy-reports/
+          if-no-files-found: warn
+
+      # El runner de GitHub tiene RAM de sobra: se prueban 2 réplicas para
+      # validar el balanceo de carga antes de desplegar.
+      - name: Levantar stack temporal con 2 réplicas
+        run: APP_VERSION="$GITHUB_SHA" APP_PORT=18080 BACKEND_REPLICAS=2 docker compose up -d --no-build
+
+      - name: Esperar y probar aplicación
+        shell: bash
+        run: |
+          URL=http://127.0.0.1:18080
+
+          for i in {1..30}; do
+            if curl -fsS "$URL/api/health" >/dev/null 2>&1; then
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "La aplicación no respondió."
+              exit 1
+            fi
+            echo "Esperando aplicación... intento $i/30"
+            sleep 5
+          done
+
+          # 1. El catálogo responde a través de Nginx -> backend.
+          curl -fsS "$URL/api/libros"
+          echo
+
+          # 2. Un id inexistente debe responder 404 (manejo de errores).
+          CODIGO=$(curl -s -o /dev/null -w '%{http_code}' "$URL/api/libros/999")
+          test "$CODIGO" = "404" || { echo "Se esperaba 404 y llegó $CODIGO"; exit 1; }
+
+          # 3. Trazabilidad: la versión publicada es exactamente este commit.
+          VERSION=$(curl -fsS "$URL/version.txt")
+          test "$VERSION" = "$GITHUB_SHA" || { echo "version.txt=$VERSION, se esperaba $GITHUB_SHA"; exit 1; }
+
+          # 4. Orquestación: las 2 réplicas deben recibir tráfico (balanceo).
+          sleep 12   # tiempo para que Nginx descubra ambas réplicas por DNS
+          REPLICAS=$(for i in $(seq 1 10); do
+            curl -fsS -D - -o /dev/null "$URL/api/libros" | grep -i "^x-backend-replica" | tr -d "\r"
+          done | sort -u | wc -l)
+          test "$REPLICAS" -ge 2 || { echo "El balanceo no repartió entre réplicas ($REPLICAS)"; exit 1; }
+          echo "Balanceo correcto: $REPLICAS réplicas atendieron peticiones."
+
+          echo "Smoke test correcto para el commit $VERSION."
+
+      - name: Mostrar logs si falla el smoke test
+        if: failure()
+        run: |
+          docker compose ps
+          docker compose logs --tail=120
+
+      - name: Detener stack temporal
+        if: always()
+        run: APP_VERSION="$GITHUB_SHA" APP_PORT=18080 BACKEND_REPLICAS=2 docker compose down --remove-orphans || true
+
+      - name: Preparar imágenes para EC2
+        run: |
+          mkdir -p deploy-package
+          docker save \
+            "minibiblioteca-backend:$GITHUB_SHA" \
+            "minibiblioteca-frontend:$GITHUB_SHA" \
+            | gzip > deploy-package/minibiblioteca-images.tar.gz
+
+          cp docker-compose.yml deploy-package/docker-compose.yml
+          # EC2 Free Tier (1 GiB): 1 réplica del backend.
+          printf 'APP_VERSION=%s\nAPP_PORT=80\nBACKEND_REPLICAS=1\n' "$GITHUB_SHA" > deploy-package/.env
+
+      - name: Publicar paquete de despliegue
+        uses: actions/upload-artifact@v4
+        with:
+          name: minibiblioteca-deploy
+          path: deploy-package/
+          if-no-files-found: error
+
+  # ==========================================================
+  # CD - DESPLIEGUE LIVIANO EN EC2
+  # La EC2 NO compila Maven ni construye imágenes Docker.
+  # ==========================================================
+  deploy:
+    name: 5. Deploy AWS EC2
+    needs: docker
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # GitHub registra cada despliegue en Settings > Environments y en la
+    # pestaña "Deployments" del repositorio: historial de qué commit se
+    # desplegó, cuándo y quién lo provocó.
+    environment: production
+
+    steps:
+      - name: Descargar paquete construido
+        uses: actions/download-artifact@v4
+        with:
+          name: minibiblioteca-deploy
+          path: deploy-package/
+
+      - name: Preparar clave SSH
+        shell: bash
+        env:
+          AWS_SSH_KEY: ${{ secrets.AWS_SSH_KEY }}
+          AWS_HOST: ${{ secrets.AWS_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$AWS_SSH_KEY" | tr -d '\r' > ~/.ssh/minibiblioteca.pem
+          chmod 600 ~/.ssh/minibiblioteca.pem
+          ssh-keyscan -T 10 -H "$AWS_HOST" >> ~/.ssh/known_hosts
+
+      - name: Verificar EC2 preparada
+        shell: bash
+        env:
+          AWS_HOST: ${{ secrets.AWS_HOST }}
+          AWS_USER: ${{ secrets.AWS_USER }}
+        run: |
+          ssh \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=10 \
+            -i ~/.ssh/minibiblioteca.pem \
+            "$AWS_USER@$AWS_HOST" '
+              set -e
+              test -f /opt/minibiblioteca/.bootstrap-ready
+              sudo docker info >/dev/null
+              sudo docker compose version
+              free -h
+              df -h /
+            '
+
+      - name: Copiar imágenes y Compose a EC2
+        shell: bash
+        env:
+          AWS_HOST: ${{ secrets.AWS_HOST }}
+          AWS_USER: ${{ secrets.AWS_USER }}
+        run: |
+          scp \
+            -i ~/.ssh/minibiblioteca.pem \
+            deploy-package/minibiblioteca-images.tar.gz \
+            deploy-package/docker-compose.yml \
+            deploy-package/.env \
+            "$AWS_USER@$AWS_HOST:/tmp/"
+
+      - name: Cargar imágenes y levantar stack
+        shell: bash
+        env:
+          AWS_HOST: ${{ secrets.AWS_HOST }}
+          AWS_USER: ${{ secrets.AWS_USER }}
+        run: |
+          ssh \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=20 \
+            -i ~/.ssh/minibiblioteca.pem \
+            "$AWS_USER@$AWS_HOST" '
+              set -e
+              mkdir -p /opt/minibiblioteca/current
+
+              mv /tmp/docker-compose.yml /opt/minibiblioteca/current/docker-compose.yml
+              mv /tmp/.env /opt/minibiblioteca/current/.env
+
+              gzip -dc /tmp/minibiblioteca-images.tar.gz | sudo docker load
+              rm -f /tmp/minibiblioteca-images.tar.gz
+
+              cd /opt/minibiblioteca/current
+              sudo docker compose up -d --no-build --remove-orphans
+
+              echo "Estado del stack:"
+              sudo docker compose ps
+            '
+
+      - name: Verificar aplicación publicada
+        shell: bash
+        env:
+          AWS_HOST: ${{ secrets.AWS_HOST }}
+          AWS_USER: ${{ secrets.AWS_USER }}
+        run: |
+          ssh \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=20 \
+            -i ~/.ssh/minibiblioteca.pem \
+            "$AWS_USER@$AWS_HOST" "EXPECTED_SHA=$GITHUB_SHA ACTOR=$GITHUB_ACTOR RUN_URL=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID bash -s" <<'EOF'
+              set -e
+              cd /opt/minibiblioteca/current
+
+              for i in {1..30}; do
+                if curl -fsS http://127.0.0.1/api/health >/dev/null 2>&1; then
+                  # Trazabilidad: la EC2 debe estar sirviendo este commit.
+                  VERSION=$(curl -fsS http://127.0.0.1/version.txt)
+                  if [ "$VERSION" != "$EXPECTED_SHA" ]; then
+                    echo "ERROR: la EC2 publica $VERSION y se esperaba $EXPECTED_SHA"
+                    exit 1
+                  fi
+
+                  # Bitácora de despliegues en el servidor.
+                  echo "$(date -u +%FT%TZ) commit=$EXPECTED_SHA actor=$ACTOR run=$RUN_URL" \
+                    >> /opt/minibiblioteca/logs/deployments.log
+
+                  echo "MiniBiblioteca disponible con el commit $VERSION."
+                  sudo docker compose ps
+                  sudo docker image prune -af
+                  exit 0
+                fi
+                echo "Esperando aplicación... intento $i/30"
+                sleep 5
+              done
+
+              echo "ERROR: la aplicación no respondió."
+              sudo docker compose ps
+              sudo docker compose logs --tail=120
+              exit 1
+          EOF
+
+      - name: Resumen del despliegue
+        if: success()
+        shell: bash
+        run: |
+          {
+            echo "## Despliegue en AWS EC2"
+            echo "| Dato | Valor |"
+            echo "|---|---|"
+            echo "| Commit | \`$GITHUB_SHA\` |"
+            echo "| Autor del cambio | $GITHUB_ACTOR |"
+            echo "| Imágenes | \`minibiblioteca-backend:$GITHUB_SHA\`, \`minibiblioteca-frontend:$GITHUB_SHA\` |"
+            echo "| Verificación | /api/health UP y /version.txt = commit |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ==========================================================
+  # ALERTA - SE EJECUTA SOLO SI UNA BARRERA FALLÓ EN MAIN
+  # ==========================================================
+  # Abre un Issue en el repositorio con el commit y el enlace al pipeline.
+  # GitHub notifica por correo a quienes siguen el repositorio, y el Issue
+  # queda abierto hasta que alguien corrija el problema y lo cierre.
+  alerta_seguridad:
+    name: Alerta - Pipeline bloqueado
+    needs: [seguridad_snyk, pruebas, sonarcloud, docker]
+    if: failure() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+
+    steps:
+      - name: Crear Issue de alerta
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          SNYK: ${{ needs.seguridad_snyk.result }}
+          PRUEBAS: ${{ needs.pruebas.result }}
+          SONAR: ${{ needs.sonarcloud.result }}
+          DOCKER: ${{ needs.docker.result }}
+        run: |
+          gh label create seguridad --color B60205 \
+            --description "Alerta automática del pipeline" --force
+
+          RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+          gh issue create \
+            --label seguridad \
+            --title "Pipeline bloqueado en main (${GITHUB_SHA::7})" \
+            --body "$(cat <<EOF
+          El pipeline CI/CD se detuvo y **no se desplegó** el commit \`$GITHUB_SHA\`.
+
+          | Barrera | Resultado |
+          |---|---|
+          | 1. Snyk (dependencias) | $SNYK |
+          | 2. JUnit + JaCoCo | $PRUEBAS |
+          | 3. SonarQube Quality Gate | $SONAR |
+          | 4. Trivy + smoke test | $DOCKER |
+
+          - Autor del cambio: @$GITHUB_ACTOR
+          - Detalle y reportes: $RUN_URL
+
+          La versión anterior sigue funcionando en la EC2. Cierra este Issue cuando el pipeline vuelva a estar verde.
+          EOF
+          )"

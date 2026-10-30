@@ -1,0 +1,91 @@
+# ============================================================
+# ORQUESTACIÓN - MINIBIBLIOTECA
+# ============================================================
+# frontend (Nginx) ──balancea──► backend réplica 1..N (Spring Boot)
+#
+# Parámetros (por variable de entorno o archivo .env):
+#   APP_VERSION       SHA del commit que identifica las imágenes.
+#   APP_PORT          Puerto publicado en el host (80 en EC2).
+#   BACKEND_REPLICAS  Cantidad de réplicas del backend (1 en EC2 Free
+#                     Tier por la RAM; el pipeline prueba con 2).
+#
+# Escalar en caliente sin reiniciar el frontend:
+#   docker compose up -d --scale backend=2
+# ============================================================
+name: minibiblioteca
+
+# Rotación de logs: sin esto, los logs de Docker crecen sin límite y
+# pueden llenar el disco pequeño de la EC2.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  backend:
+    image: minibiblioteca-backend:${APP_VERSION:-local}
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      # El SHA del commit queda grabado en la imagen (trazabilidad).
+      args:
+        APP_VERSION: ${APP_VERSION:-local}
+    # Sin container_name: Compose necesita nombres distintos para crear
+    # varias réplicas (minibiblioteca-backend-1, -2, ...).
+    deploy:
+      replicas: ${BACKEND_REPLICAS:-1}
+    restart: unless-stopped
+    environment:
+      JAVA_TOOL_OPTIONS: >-
+        -Xms64m -Xmx256m -XX:MaxMetaspaceSize=128m -XX:+UseSerialGC
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/api/health || exit 1"]
+      interval: 10s
+      timeout: 4s
+      retries: 12
+      start_period: 20s
+    # Límites por réplica: una réplica con fuga de memoria no puede
+    # dejar sin RAM al resto del servidor.
+    mem_limit: 480m
+    cpus: 0.60
+    # Endurecimiento: sistema de archivos de solo lectura (salvo /tmp),
+    # sin escalada de privilegios y sin capacidades extra del kernel.
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging: *logging
+    networks:
+      - minibiblioteca-net
+
+  frontend:
+    image: minibiblioteca-frontend:${APP_VERSION:-local}
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        APP_VERSION: ${APP_VERSION:-local}
+    container_name: minibiblioteca-frontend
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-80}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    mem_limit: 96m
+    cpus: 0.20
+    security_opt:
+      - no-new-privileges:true
+    logging: *logging
+    networks:
+      - minibiblioteca-net
+
+networks:
+  minibiblioteca-net:
+    driver: bridge

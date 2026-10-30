@@ -1,0 +1,5 @@
+# Los scripts se ejecutan en Linux (EC2 y runners de GitHub): siempre LF.
+*.sh   text eol=lf
+*.yml  text eol=lf
+*.conf text eol=lf
+Dockerfile text eol=lf
