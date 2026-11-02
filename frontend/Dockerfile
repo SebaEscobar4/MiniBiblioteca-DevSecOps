@@ -1,6 +1,6 @@
 # Versión fija de Nginx (rama stable): "nginx:alpine" cambia sola con
 # el tiempo y una build de hoy podría no ser igual a la de mañana.
-FROM nginx:1.30-alpine
+FROM nginx:1.31-alpine
 
 ARG APP_VERSION=local
 LABEL org.opencontainers.image.title="minibiblioteca-frontend" \
