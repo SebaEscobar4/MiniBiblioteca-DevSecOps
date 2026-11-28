@@ -27,7 +27,7 @@ public class LibroService {
 
     public long contarDisponibles() {
         return libroRepository.findAll().stream()
-                .filter(Libro::disponible)
+                .filter(libro -> !libro.disponible())   // DEMO IE6: bug intencional
                 .count();
     }
 }
