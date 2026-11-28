@@ -1,0 +1,10 @@
+# Namespace de la aplicación. La etiqueta de Pod Security Admission
+# "restricted" hace que el propio Kubernetes rechace pods que no cumplan
+# las buenas prácticas (correr como root, escalar privilegios, etc.).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: minibiblioteca
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest

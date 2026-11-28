@@ -1,0 +1,18 @@
+# Fuentes de datos de Grafana (se crean solas al arrancar).
+# Los mismos nombres de servicio sirven en Docker Compose y en Kubernetes
+# (namespace "monitoreo"), por eso este archivo se usa en ambos entornos.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://loki:3100

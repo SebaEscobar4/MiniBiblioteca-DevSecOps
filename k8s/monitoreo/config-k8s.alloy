@@ -1,0 +1,60 @@
+// ============================================================
+// GRAFANA ALLOY - RECOLECCIÓN DE LOGS EN KUBERNETES
+// ============================================================
+// Lee los logs de los pods del namespace "minibiblioteca" a través de la
+// API de Kubernetes (sin montar carpetas del nodo) y los envía a Loki con
+// las mismas etiquetas que en Docker Compose ("service" = backend/frontend),
+// así el dashboard funciona igual en los dos entornos.
+// ============================================================
+
+discovery.kubernetes "pods" {
+  role = "pod"
+
+  namespaces {
+    names = ["minibiblioteca"]
+  }
+}
+
+discovery.relabel "pods" {
+  targets = discovery.kubernetes.pods.targets
+
+  rule {
+    source_labels = ["__meta_kubernetes_pod_label_app"]
+    target_label  = "service"
+  }
+
+  rule {
+    source_labels = ["__meta_kubernetes_pod_name"]
+    target_label  = "pod"
+  }
+
+  rule {
+    source_labels = ["__meta_kubernetes_namespace"]
+    target_label  = "namespace"
+  }
+
+  rule {
+    source_labels = ["__meta_kubernetes_pod_container_name"]
+    target_label  = "container"
+  }
+}
+
+loki.source.kubernetes "pods" {
+  targets    = discovery.relabel.pods.output
+  forward_to = [loki.process.etiquetas.receiver]
+}
+
+loki.process "etiquetas" {
+  stage.static_labels {
+    values = {
+      entorno = "kubernetes",
+    }
+  }
+  forward_to = [loki.write.local.receiver]
+}
+
+loki.write "local" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

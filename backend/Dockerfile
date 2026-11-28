@@ -47,6 +47,10 @@ COPY --from=build --chown=app:app /build/extracted/spring-boot-loader/ ./
 COPY --from=build --chown=app:app /build/extracted/snapshot-dependencies/ ./
 COPY --from=build --chown=app:app /build/extracted/application/ ./
 
+# La versión queda disponible para la aplicación: /actuator/info y la
+# métrica minibiblioteca_build_info{version="<sha>"} la publican.
+ENV APP_VERSION=${APP_VERSION}
+
 # Usuario sin privilegios: si alguien compromete la app, no es root.
 USER app
 EXPOSE 8080

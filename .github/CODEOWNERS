@@ -1,0 +1,7 @@
+# Responsables que GitHub asigna como revisores de cada parte del repositorio.
+# Con "require_code_owner_reviews" en la protección de main, sus aprobaciones
+# pasan a ser obligatorias.
+*                       @SebaEscobar4
+/.github/               @SebaEscobar4
+/k8s/                   @SebaEscobar4
+/politicas/             @SebaEscobar4

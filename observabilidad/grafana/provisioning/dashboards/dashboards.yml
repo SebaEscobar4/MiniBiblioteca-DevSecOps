@@ -1,0 +1,12 @@
+# Carga automática de los dashboards guardados como JSON en el repositorio
+# ("dashboards as code"): cualquier cambio pasa por Git y por el pipeline.
+apiVersion: 1
+
+providers:
+  - name: minibiblioteca
+    folder: MiniBiblioteca
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards

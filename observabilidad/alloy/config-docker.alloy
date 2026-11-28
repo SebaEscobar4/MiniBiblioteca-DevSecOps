@@ -1,0 +1,54 @@
+// ============================================================
+// GRAFANA ALLOY - RECOLECCIÓN DE LOGS EN DOCKER COMPOSE
+// ============================================================
+// Lee los logs de los contenedores del proyecto (backend y frontend)
+// desde el socket de Docker y los envía a Loki con las etiquetas
+// "service" y "container" para poder filtrarlos en Grafana.
+// ============================================================
+
+discovery.docker "contenedores" {
+  host = "unix:///var/run/docker.sock"
+
+  // Solo contenedores del proyecto Compose "minibiblioteca" (ignora otros
+  // proyectos que existan en la misma máquina).
+  filter {
+    name   = "label"
+    values = ["com.docker.compose.project=minibiblioteca"]
+  }
+}
+
+discovery.relabel "contenedores" {
+  targets = []
+
+  // Solo los servicios de la aplicación, no el stack de monitoreo.
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    regex         = "backend|frontend"
+    action        = "keep"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+}
+
+loki.source.docker "contenedores" {
+  host          = "unix:///var/run/docker.sock"
+  targets       = discovery.docker.contenedores.targets
+  labels        = {"entorno" = "docker-compose"}
+  relabel_rules = discovery.relabel.contenedores.rules
+  forward_to    = [loki.write.local.receiver]
+}
+
+loki.write "local" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

@@ -1,0 +1,32 @@
+# kubectl kustomize --load-restrictor LoadRestrictionsNone k8s/monitoreo | kubectl apply -f -
+#
+# Los ConfigMaps se generan desde los MISMOS archivos que usa Docker
+# Compose (carpeta observabilidad/): reglas de alerta, sondas, fuentes de
+# datos y dashboard. Por eso se necesita --load-restrictor LoadRestrictionsNone.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: monitoreo
+resources:
+  - monitoreo.yaml
+generatorOptions:
+  disableNameSuffixHash: true
+configMapGenerator:
+  - name: prometheus-config
+    files:
+      - prometheus.yml=prometheus-k8s.yml
+      - alertas.yml=../../observabilidad/prometheus/alertas.yml
+  - name: blackbox-config
+    files:
+      - blackbox.yml=../../observabilidad/blackbox/blackbox.yml
+  - name: alloy-config
+    files:
+      - config.alloy=config-k8s.alloy
+  - name: grafana-datasources
+    files:
+      - datasources.yml=../../observabilidad/grafana/provisioning/datasources/datasources.yml
+  - name: grafana-dashboards-proveedor
+    files:
+      - dashboards.yml=../../observabilidad/grafana/provisioning/dashboards/dashboards.yml
+  - name: grafana-dashboards
+    files:
+      - minibiblioteca.json=../../observabilidad/grafana/dashboards/minibiblioteca.json

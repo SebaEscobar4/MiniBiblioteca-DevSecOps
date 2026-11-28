@@ -1,0 +1,369 @@
+# ============================================================
+# STACK DE MONITOREO EN KUBERNETES (namespace "monitoreo")
+# ============================================================
+# prometheus  métricas + reglas de alerta   (lee pods vía API -> RBAC)
+# pushgateway métricas del pipeline CI/CD
+# blackbox    sondas de disponibilidad HTTP
+# loki        logs
+# alloy       recolector de logs de los pods (lee logs vía API -> RBAC)
+# grafana     dashboard (fuentes de datos y dashboard cargados desde Git)
+# ============================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoreo
+---
+# ---------------- Prometheus ----------------
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prometheus-lectura
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "endpoints"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus-lectura
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: prometheus-lectura
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: monitoreo
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  labels: {app: prometheus}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: prometheus}
+  template:
+    metadata:
+      labels: {app: prometheus}
+    spec:
+      serviceAccountName: prometheus
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        fsGroup: 65534
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v3.15.1
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            - --storage.tsdb.retention.time=2d
+          ports:
+            - {name: http, containerPort: 9090}
+          readinessProbe:
+            httpGet: {path: /-/ready, port: http}
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: "1", memory: 768Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: config, mountPath: /etc/prometheus}
+            - {name: datos, mountPath: /prometheus}
+      volumes:
+        - name: config
+          configMap: {name: prometheus-config}
+        - name: datos
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+spec:
+  selector: {app: prometheus}
+  ports:
+    - {name: http, port: 9090, targetPort: http}
+---
+# ---------------- Pushgateway ----------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pushgateway
+  labels: {app: pushgateway}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: pushgateway}
+  template:
+    metadata:
+      labels: {app: pushgateway}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: pushgateway
+          image: prom/pushgateway:v1.11.4
+          ports:
+            - {name: http, containerPort: 9091}
+          resources:
+            requests: {cpu: 20m, memory: 32Mi}
+            limits: {cpu: 200m, memory: 64Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pushgateway
+spec:
+  selector: {app: pushgateway}
+  ports:
+    - {name: http, port: 9091, targetPort: http}
+---
+# ---------------- Blackbox exporter ----------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: blackbox
+  labels: {app: blackbox}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: blackbox}
+  template:
+    metadata:
+      labels: {app: blackbox}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: blackbox
+          image: prom/blackbox-exporter:v0.29.0
+          args: ["--config.file=/etc/blackbox/blackbox.yml"]
+          ports:
+            - {name: http, containerPort: 9115}
+          resources:
+            requests: {cpu: 20m, memory: 32Mi}
+            limits: {cpu: 200m, memory: 64Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: config, mountPath: /etc/blackbox}
+      volumes:
+        - name: config
+          configMap: {name: blackbox-config}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: blackbox
+spec:
+  selector: {app: blackbox}
+  ports:
+    - {name: http, port: 9115, targetPort: http}
+---
+# ---------------- Loki ----------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loki
+  labels: {app: loki}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: loki}
+  template:
+    metadata:
+      labels: {app: loki}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: loki
+          image: grafana/loki:3.7.9
+          args: ["-config.file=/etc/loki/local-config.yaml"]
+          ports:
+            - {name: http, containerPort: 3100}
+          readinessProbe:
+            httpGet: {path: /ready, port: http}
+            initialDelaySeconds: 10
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: datos, mountPath: /loki}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: datos
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: loki
+spec:
+  selector: {app: loki}
+  ports:
+    - {name: http, port: 3100, targetPort: http}
+---
+# ---------------- Alloy (logs) ----------------
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: alloy
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: alloy-logs
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: alloy-logs
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: alloy-logs
+subjects:
+  - kind: ServiceAccount
+    name: alloy
+    namespace: monitoreo
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alloy
+  labels: {app: alloy}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: alloy}
+  template:
+    metadata:
+      labels: {app: alloy}
+    spec:
+      serviceAccountName: alloy
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 473
+        runAsGroup: 473
+        fsGroup: 473
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: alloy
+          image: grafana/alloy:v1.21.1
+          args:
+            - run
+            - /etc/alloy/config.alloy
+            - --storage.path=/var/lib/alloy/data
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: config, mountPath: /etc/alloy}
+            - {name: datos, mountPath: /var/lib/alloy/data}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: config
+          configMap: {name: alloy-config}
+        - name: datos
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+# ---------------- Grafana ----------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  labels: {app: grafana}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: grafana}
+  template:
+    metadata:
+      labels: {app: grafana}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 472
+        fsGroup: 472
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: grafana
+          image: grafana/grafana:12.4.14
+          env:
+            - {name: GF_AUTH_ANONYMOUS_ENABLED, value: "true"}
+            - {name: GF_AUTH_ANONYMOUS_ORG_ROLE, value: Viewer}
+            - {name: GF_AUTH_DISABLE_LOGIN_FORM, value: "true"}
+            - {name: GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH, value: /var/lib/grafana/dashboards/minibiblioteca.json}
+            - {name: GF_USERS_DEFAULT_LANGUAGE, value: es-ES}
+          ports:
+            - {name: http, containerPort: 3000}
+          readinessProbe:
+            httpGet: {path: /api/health, port: http}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 384Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: datasources, mountPath: /etc/grafana/provisioning/datasources}
+            - {name: proveedor, mountPath: /etc/grafana/provisioning/dashboards}
+            - {name: dashboards, mountPath: /var/lib/grafana/dashboards}
+      volumes:
+        - name: datasources
+          configMap: {name: grafana-datasources}
+        - name: proveedor
+          configMap: {name: grafana-dashboards-proveedor}
+        - name: dashboards
+          configMap: {name: grafana-dashboards}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+spec:
+  selector: {app: grafana}
+  ports:
+    - {name: http, port: 3000, targetPort: http}

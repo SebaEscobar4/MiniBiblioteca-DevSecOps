@@ -1,0 +1,14 @@
+# kubectl apply -k k8s/app
+# El pipeline reemplaza la etiqueta "local" por el SHA del commit.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: minibiblioteca
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: minibiblioteca
+    includeSelectors: false
+resources:
+  - namespace.yaml
+  - backend.yaml
+  - frontend.yaml
+  - networkpolicy.yaml

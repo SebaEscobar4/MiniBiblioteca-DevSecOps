@@ -1,0 +1,63 @@
+# ============================================================
+# REGLAS DE ALERTA (detección de anomalías)
+# ============================================================
+# Se usan igual en Docker Compose y en Kubernetes. Se ven en la pestaña
+# "Alerts" de Prometheus y en el panel "Alertas activas" de Grafana.
+# ============================================================
+groups:
+  - name: minibiblioteca
+    rules:
+      - alert: BackendSinReplicas
+        expr: sum(up{job="backend"}) == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No hay ninguna réplica del backend respondiendo a Prometheus"
+
+      - alert: ServicioNoDisponible
+        expr: min(probe_success) == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "La sonda de disponibilidad falla en {{ $labels.instance }}"
+
+      - alert: TasaDeErroresAlta
+        expr: |
+          sum(rate(http_server_requests_seconds_count{application="minibiblioteca-backend",status=~"5.."}[5m]))
+            / clamp_min(sum(rate(http_server_requests_seconds_count{application="minibiblioteca-backend"}[5m])), 0.001)
+          > 0.05
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Más del 5 % de las peticiones terminan en error 5xx"
+
+      - alert: LatenciaAlta
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(http_server_requests_seconds_bucket{application="minibiblioteca-backend",uri!~"/actuator.*"}[5m])) by (le)
+          ) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "El percentil 95 del tiempo de respuesta supera 1 segundo"
+
+      - alert: MemoriaHeapAlta
+        expr: |
+          sum(jvm_memory_used_bytes{area="heap"}) by (instance)
+            / sum(jvm_memory_max_bytes{area="heap"}) by (instance) > 0.85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "La réplica {{ $labels.instance }} usa más del 85 % de su heap"
+
+      - alert: CoberturaBajoElMinimo
+        expr: minibiblioteca_ci_cobertura_porcentaje < 80
+        labels:
+          severity: warning
+        annotations:
+          summary: "La última ejecución del pipeline reportó cobertura menor a 80 %"

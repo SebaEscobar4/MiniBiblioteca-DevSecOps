@@ -1,0 +1,48 @@
+# ============================================================
+# POLÍTICAS DE RED (mínimo privilegio)
+# ============================================================
+# 1. Por defecto nadie puede entrar a los pods del namespace.
+# 2. El frontend acepta tráfico de cualquier origen (es la puerta de entrada).
+# 3. El backend solo acepta tráfico del frontend y de Prometheus
+#    (namespace "monitoreo"), igual que en Compose no se publica el 8080.
+# ============================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: denegar-todo
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: permitir-frontend
+spec:
+  podSelector:
+    matchLabels:
+      app: frontend
+  policyTypes: ["Ingress"]
+  ingress:
+    - ports:
+        - port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: permitir-backend
+spec:
+  podSelector:
+    matchLabels:
+      app: backend
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: frontend
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoreo
+      ports:
+        - port: 8080

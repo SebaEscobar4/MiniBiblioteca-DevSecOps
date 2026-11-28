@@ -4,7 +4,10 @@ on:
   pull_request:
     branches: [ main ]
   push:
-    branches: [ main ]
+    # main despliega; ep3 y demo/** solo validan (el deploy a EC2 exige main).
+    # Las ramas demo/** se usan para demostrar que el pipeline se detiene.
+    branches: [ main, ep3, 'demo/**' ]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -17,7 +20,67 @@ concurrency:
 
 jobs:
   # ==========================================================
-  # CI 0 - SNYK / SOFTWARE COMPOSITION ANALYSIS
+  # CI 0 - AUDITORÍA DE CUMPLIMIENTO (policy as code)
+  # Corre en paralelo con Snyk. Si falla una política bloqueante,
+  # Docker, Kubernetes y el deploy no se ejecutan.
+  # ==========================================================
+  cumplimiento:
+    name: 0. Auditoría de cumplimiento
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar código (con historial para buscar secretos)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Busca contraseñas, tokens o llaves en TODO el historial de Git.
+      - name: Gitleaks - secretos en el repositorio
+        run: |
+          docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.30.1 \
+            git /repo --redact --no-banner --exit-code 1
+
+      # Malas configuraciones en Dockerfiles y manifiestos de Kubernetes
+      # (correr como root, sin límites de recursos, privilegios, etc.).
+      - name: Trivy - configuración de Dockerfiles y Kubernetes
+        run: |
+          for RUTA in backend frontend k8s/app; do
+            echo "== $RUTA"
+            docker run --rm -v "$PWD:/repo:ro" aquasec/trivy:0.76.1 config \
+              --quiet --severity HIGH,CRITICAL --exit-code 1 "/repo/$RUTA"
+          done
+
+      - name: Validar manifiestos contra el esquema de Kubernetes
+        run: |
+          mkdir -p render
+          kubectl kustomize k8s/app > render/app.yaml
+          kubectl kustomize --load-restrictor LoadRestrictionsNone k8s/monitoreo > render/monitoreo.yaml
+          docker run --rm -v "$PWD/render:/m:ro" ghcr.io/yannh/kubeconform:v0.8.0 \
+            -strict -summary /m/app.yaml /m/monitoreo.yaml
+
+      # Políticas propias (CIS Docker, CIS Kubernetes, ISO 27001, OWASP SAMM).
+      - name: Auditoría de políticas
+        run: |
+          python3 -m pip install --quiet pyyaml
+          python3 scripts/auditoria-cumplimiento.py --salida reportes
+
+      - name: Resumen de la auditoría
+        if: always()
+        run: |
+          if [ -f reportes/cumplimiento.md ]; then
+            cat reportes/cumplimiento.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Publicar reporte de cumplimiento
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reporte-cumplimiento
+          path: reportes/
+          if-no-files-found: warn
+
+  # ==========================================================
+  # CI 1 - SNYK / SOFTWARE COMPOSITION ANALYSIS
   # ==========================================================
   seguridad_snyk:
     name: 1. Snyk - Dependencias
@@ -255,7 +318,7 @@ jobs:
   # ==========================================================
   docker:
     name: 4. Docker Compose y Smoke Test
-    needs: sonarcloud
+    needs: [sonarcloud, cumplimiento]
     runs-on: ubuntu-latest
 
     steps:
@@ -398,12 +461,195 @@ jobs:
           include-hidden-files: true
 
   # ==========================================================
-  # CD - DESPLIEGUE LIVIANO EN EC2
+  # CD 1 - KUBERNETES + OBSERVABILIDAD (entorno orquestado)
+  # Crea un clúster Kubernetes (kind) en el runner de GitHub, despliega
+  # la aplicación y el stack de monitoreo, mide el tiempo de despliegue,
+  # publica las métricas del pipeline y VALIDA que Prometheus, Loki y
+  # Grafana estén registrando la aplicación. Si algo falla, no hay deploy.
+  # ==========================================================
+  kubernetes:
+    name: 6. Kubernetes y observabilidad
+    needs: docker
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SHA: ${{ github.sha }}
+
+    steps:
+      - name: Descargar código
+        uses: actions/checkout@v4
+
+      - name: Descargar imágenes construidas en el job 4
+        uses: actions/download-artifact@v4
+        with:
+          name: minibiblioteca-deploy
+          path: deploy-package/
+
+      - name: Descargar reportes de pruebas y cobertura
+        uses: actions/download-artifact@v4
+        with:
+          pattern: '{jacoco-backend,surefire-reports}'
+          path: reportes/
+
+      - name: Crear clúster Kubernetes (kind)
+        uses: helm/kind-action@v1.15.1
+        with:
+          cluster_name: minibiblioteca
+
+      - name: Cargar las imágenes en el clúster
+        run: |
+          gzip -dc deploy-package/minibiblioteca-images.tar.gz | docker load
+          kind load docker-image --name minibiblioteca \
+            "minibiblioteca-backend:$SHA" "minibiblioteca-frontend:$SHA"
+
+      # metrics-server entrega el uso de CPU/memoria de los pods al HPA.
+      - name: Instalar metrics-server
+        run: |
+          kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.9.0/components.yaml
+          kubectl -n kube-system patch deployment metrics-server --type=json \
+            -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+
+      - name: Desplegar el stack de monitoreo
+        run: |
+          kubectl kustomize --load-restrictor LoadRestrictionsNone k8s/monitoreo | kubectl apply -f -
+          for D in prometheus pushgateway blackbox loki alloy grafana; do
+            kubectl -n monitoreo rollout status "deploy/$D" --timeout=300s
+          done
+
+      - name: Desplegar la aplicación (mide el tiempo de despliegue)
+        id: despliegue
+        run: |
+          INICIO=$(date +%s)
+          kubectl kustomize k8s/app \
+            | sed "s#minibiblioteca-\(backend\|frontend\):local#minibiblioteca-\1:${SHA}#" \
+            | kubectl apply -f -
+          # Trazabilidad: el historial de rollout guarda el commit y el run.
+          kubectl -n minibiblioteca annotate deploy backend frontend --overwrite \
+            kubernetes.io/change-cause="commit ${SHA} - run ${GITHUB_RUN_ID}"
+          kubectl -n minibiblioteca rollout status deploy/backend --timeout=300s
+          kubectl -n minibiblioteca rollout status deploy/frontend --timeout=180s
+          echo "segundos=$(( $(date +%s) - INICIO ))" >> "$GITHUB_OUTPUT"
+          kubectl -n minibiblioteca get deploy,pods,svc,hpa -o wide
+
+      - name: Abrir accesos al clúster (port-forward)
+        run: |
+          kubectl -n minibiblioteca port-forward svc/frontend 18080:80 > /tmp/pf-frontend.log 2>&1 &
+          kubectl -n monitoreo port-forward svc/prometheus 9090:9090 > /tmp/pf-prometheus.log 2>&1 &
+          kubectl -n monitoreo port-forward svc/pushgateway 9091:9091 > /tmp/pf-pushgateway.log 2>&1 &
+          kubectl -n monitoreo port-forward svc/loki 3100:3100 > /tmp/pf-loki.log 2>&1 &
+          kubectl -n monitoreo port-forward svc/grafana 3000:3000 > /tmp/pf-grafana.log 2>&1 &
+          sleep 5
+
+      - name: Smoke test y tráfico de prueba
+        run: |
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:18080/api/health && break
+            sleep 3
+          done
+          VERSION=$(curl -fsS http://127.0.0.1:18080/version.txt)
+          test "$VERSION" = "$SHA" || { echo "version.txt=$VERSION, se esperaba $SHA"; exit 1; }
+          # Incluye errores 404 y 500 controlados para el panel de errores.
+          bash scripts/generar-trafico.sh http://127.0.0.1:18080 40
+
+      - name: Publicar métricas del pipeline en Pushgateway
+        id: metricas
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          CSV=$(find reportes -name jacoco.csv | head -1)
+          COBERTURA=$(awk -F, 'NR>1 {m+=$8; c+=$9} END {printf "%.1f", 100*c/(c+m)}' "$CSV")
+          suma() { grep -ho "$1=\"[0-9]*\"" $(find reportes -name 'TEST-*.xml') | grep -o '[0-9]*' | paste -sd+ | bc; }
+          PRUEBAS=$(suma tests)
+          FALLIDAS=$(( $(suma failures) + $(suma errors) ))
+          INICIO_RUN=$(curl -fsS -H "Authorization: Bearer $GH_TOKEN" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" | jq -r .run_started_at)
+          PIPELINE=$(( $(date +%s) - $(date -d "$INICIO_RUN" +%s) ))
+          DESPLIEGUE="${{ steps.despliegue.outputs.segundos }}"
+
+          PUSHGATEWAY_URL=http://127.0.0.1:9091 COMMIT="$SHA" RAMA="$GITHUB_REF_NAME" \
+          COBERTURA="$COBERTURA" PRUEBAS_TOTAL="$PRUEBAS" PRUEBAS_FALLIDAS="$FALLIDAS" \
+          DESPLIEGUE_SEGUNDOS="$DESPLIEGUE" PIPELINE_SEGUNDOS="$PIPELINE" \
+            bash scripts/publicar-metricas-ci.sh
+
+          {
+            echo "cobertura=$COBERTURA"
+            echo "pruebas=$PRUEBAS"
+            echo "fallidas=$FALLIDAS"
+            echo "despliegue=$DESPLIEGUE"
+            echo "pipeline=$PIPELINE"
+          } >> "$GITHUB_OUTPUT"
+
+      # Barrera de observabilidad: si el monitoreo no ve la aplicación, el
+      # pipeline se detiene (no se despliega algo que no se puede vigilar).
+      - name: Validar que el monitoreo registra la aplicación
+        run: bash scripts/validar-observabilidad.sh http://127.0.0.1:9090 http://127.0.0.1:3100 "$SHA"
+
+      - name: Captura del dashboard de Grafana
+        continue-on-error: true
+        run: |
+          mkdir -p evidencias
+          npx --yes playwright@1.64.1 install --with-deps chromium > /dev/null
+          npx --yes playwright@1.64.1 screenshot --full-page --viewport-size "1600, 1800" \
+            --wait-for-timeout 15000 \
+            "http://127.0.0.1:3000/d/minibiblioteca-devops/minibiblioteca?orgId=1&from=now-15m&to=now&kiosk" \
+            evidencias/dashboard-grafana.png
+
+      - name: Guardar evidencias del clúster
+        if: always()
+        run: |
+          mkdir -p evidencias
+          kubectl get nodes -o wide > evidencias/nodos.txt 2>&1 || true
+          kubectl get all,hpa,pdb,networkpolicy -n minibiblioteca -o wide > evidencias/minibiblioteca.txt 2>&1 || true
+          kubectl get all -n monitoreo -o wide > evidencias/monitoreo.txt 2>&1 || true
+          kubectl -n minibiblioteca rollout history deploy/backend > evidencias/rollout-backend.txt 2>&1 || true
+          kubectl top pods -A > evidencias/kubectl-top.txt 2>&1 || true
+          curl -fsS "http://127.0.0.1:9090/api/v1/targets" > evidencias/prometheus-targets.json 2>/dev/null || true
+          curl -fsS "http://127.0.0.1:9090/api/v1/rules" > evidencias/prometheus-alertas.json 2>/dev/null || true
+          kubectl -n minibiblioteca logs deploy/backend --tail=50 > evidencias/logs-backend.txt 2>&1 || true
+
+      - name: Resumen del dashboard CI/CD
+        if: always()
+        run: |
+          {
+            echo "## Dashboard del pipeline y del entorno Kubernetes"
+            echo
+            echo "| Métrica | Valor |"
+            echo "|---|---|"
+            echo "| Commit desplegado | \`$SHA\` |"
+            echo "| Tiempo de despliegue en Kubernetes | ${{ steps.despliegue.outputs.segundos || 'n/d' }} s |"
+            echo "| Duración del pipeline hasta el despliegue | ${{ steps.metricas.outputs.pipeline || 'n/d' }} s |"
+            echo "| Cobertura de pruebas | ${{ steps.metricas.outputs.cobertura || 'n/d' }} % |"
+            echo "| Pruebas ejecutadas / fallidas | ${{ steps.metricas.outputs.pruebas || 'n/d' }} / ${{ steps.metricas.outputs.fallidas || 'n/d' }} |"
+            if [ -f evidencias/validacion.md ]; then cat evidencias/validacion.md; fi
+            echo
+            echo "La captura completa del dashboard de Grafana está en el artifact **evidencias-kubernetes**."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Diagnóstico si algo falló
+        if: failure()
+        run: |
+          kubectl get pods -A -o wide || true
+          kubectl -n minibiblioteca describe pods || true
+          kubectl -n monitoreo describe pods || true
+          kubectl -n minibiblioteca logs deploy/backend --tail=100 || true
+          kubectl -n minibiblioteca logs deploy/frontend --tail=100 || true
+
+      - name: Publicar evidencias
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidencias-kubernetes
+          path: evidencias/
+          if-no-files-found: warn
+
+  # ==========================================================
+  # CD 2 - DESPLIEGUE LIVIANO EN EC2
   # La EC2 NO compila Maven ni construye imágenes Docker.
+  # Solo corre en main y después de validar el despliegue en Kubernetes.
   # ==========================================================
   deploy:
     name: 5. Deploy AWS EC2
-    needs: docker
+    needs: [docker, kubernetes]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -558,7 +804,7 @@ jobs:
   # queda abierto hasta que alguien corrija el problema y lo cierre.
   alerta_seguridad:
     name: Alerta - Pipeline bloqueado
-    needs: [seguridad_snyk, pruebas, sonarcloud, docker, deploy]
+    needs: [cumplimiento, seguridad_snyk, pruebas, sonarcloud, docker, kubernetes, deploy]
     if: failure() && github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
@@ -569,10 +815,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
+          CUMPLIMIENTO: ${{ needs.cumplimiento.result }}
           SNYK: ${{ needs.seguridad_snyk.result }}
           PRUEBAS: ${{ needs.pruebas.result }}
           SONAR: ${{ needs.sonarcloud.result }}
           DOCKER: ${{ needs.docker.result }}
+          KUBERNETES: ${{ needs.kubernetes.result }}
           DEPLOY: ${{ needs.deploy.result }}
         run: |
           gh label create seguridad --color B60205 \
@@ -588,10 +836,12 @@ jobs:
 
           | Barrera | Resultado |
           |---|---|
+          | 0. Auditoría de cumplimiento | $CUMPLIMIENTO |
           | 1. Snyk (dependencias) | $SNYK |
           | 2. JUnit + JaCoCo | $PRUEBAS |
           | 3. SonarQube Quality Gate | $SONAR |
           | 4. Trivy + smoke test | $DOCKER |
+          | 6. Kubernetes y observabilidad | $KUBERNETES |
           | 5. Deploy EC2 | $DEPLOY |
 
           - Autor del cambio: @$GITHUB_ACTOR

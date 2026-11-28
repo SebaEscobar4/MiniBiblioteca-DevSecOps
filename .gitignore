@@ -16,3 +16,7 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Reportes generados por la auditoría y el pipeline
+reportes/
+render/

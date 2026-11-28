@@ -1,0 +1,112 @@
+# ============================================================
+# STACK DE OBSERVABILIDAD (se suma al docker-compose.yml principal)
+# ============================================================
+#   docker compose -f docker-compose.yml \
+#                  -f observabilidad/docker-compose.observabilidad.yml up -d
+#
+#   Grafana      http://localhost:3000   (dashboard "MiniBiblioteca - Observabilidad DevOps")
+#   Prometheus   http://localhost:9090   (métricas, targets y alertas)
+#
+#   prometheus   recolecta métricas del backend, sondas y pipeline
+#   alloy        recolecta los logs de los contenedores y los envía a Loki
+#   loki         guarda los logs
+#   blackbox     sondas de disponibilidad HTTP
+#   pushgateway  recibe las métricas que publica el pipeline CI/CD
+#   grafana      dashboard con todo lo anterior
+#
+# Pensado para el equipo local o una EC2 con más RAM; la EC2 Free Tier
+# (1 GiB) no alcanza para el stack completo.
+# Las rutas son relativas a la raíz del repo: con varios -f, Compose usa la
+# carpeta del primer archivo (docker-compose.yml) como base.
+# ============================================================
+
+services:
+  prometheus:
+    image: prom/prometheus:v3.15.1
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+      - --web.enable-lifecycle
+    volumes:
+      - ./observabilidad/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observabilidad/prometheus/alertas.yml:/etc/prometheus/alertas.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    mem_limit: 256m
+    networks:
+      - minibiblioteca-net
+
+  pushgateway:
+    image: prom/pushgateway:v1.11.4
+    restart: unless-stopped
+    ports:
+      - "9091:9091"
+    mem_limit: 64m
+    networks:
+      - minibiblioteca-net
+
+  blackbox:
+    image: prom/blackbox-exporter:v0.29.0
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/blackbox/blackbox.yml
+    volumes:
+      - ./observabilidad/blackbox/blackbox.yml:/etc/blackbox/blackbox.yml:ro
+    mem_limit: 64m
+    networks:
+      - minibiblioteca-net
+
+  loki:
+    image: grafana/loki:3.7.9
+    restart: unless-stopped
+    command:
+      - -config.file=/etc/loki/local-config.yaml
+    mem_limit: 256m
+    networks:
+      - minibiblioteca-net
+
+  alloy:
+    image: grafana/alloy:v1.21.1
+    restart: unless-stopped
+    command:
+      - run
+      - /etc/alloy/config.alloy
+      - --storage.path=/var/lib/alloy/data
+    volumes:
+      - ./observabilidad/alloy/config-docker.alloy:/etc/alloy/config.alloy:ro
+      # Solo lectura: Alloy lee los logs de los contenedores.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - loki
+    mem_limit: 128m
+    networks:
+      - minibiblioteca-net
+
+  grafana:
+    image: grafana/grafana:12.4.14
+    restart: unless-stopped
+    environment:
+      # Laboratorio: acceso de solo lectura sin login para ver el dashboard.
+      # Sin formulario de login ni clave por defecto: los dashboards se
+      # cambian solo por Git ("dashboards as code"), no desde la interfaz.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/minibiblioteca.json
+      GF_USERS_DEFAULT_LANGUAGE: es-ES
+    volumes:
+      - ./observabilidad/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observabilidad/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+      - loki
+    mem_limit: 256m
+    networks:
+      - minibiblioteca-net
+
+volumes:
+  prometheus-data:

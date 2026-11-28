@@ -1,0 +1,9 @@
+# Módulo de sonda HTTP: éxito si responde 2xx en menos de 5 s.
+modules:
+  http_2xx:
+    prober: http
+    timeout: 5s
+    http:
+      valid_status_codes: []   # vacío = cualquier 2xx
+      method: GET
+      preferred_ip_protocol: ip4
