@@ -167,4 +167,22 @@ python3 scripts/auditoria-cumplimiento.py
 
 Cada rama `demo/*` introduce una falla a propósito. El push dispara el pipeline y este se detiene antes de construir o desplegar.
 
-<!-- DEMOS -->
+| Rama | Falla introducida | Dónde se detuvo | Jobs omitidos | Ejecución |
+|---|---|---|---|---|
+| `demo/falla-seguridad` | `log4j-core 2.14.1` (Log4Shell, CVE-2021-44228) | **Job 1 · Snyk**, paso "Aplicar Security Gate" | 2, 3, 4, 5, 6 | [run 46181749045](https://github.com/SebaEscobar4/MiniBiblioteca-DevSecOps/actions/runs/46181749045) |
+| `demo/falla-calidad` | Bug en `contarDisponibles` (cuenta los no disponibles) | **Job 2 · JUnit**, la prueba `contarDisponibles_deberiaContarSoloDisponibles` falla | 3, 4, 5, 6 | [run 46181760560](https://github.com/SebaEscobar4/MiniBiblioteca-DevSecOps/actions/runs/46181760560) |
+| `demo/falla-cumplimiento` | Backend en Kubernetes con `runAsUser: 0` y `privileged: true` | **Job 0 · Trivy config** (la auditoría propia también lo detecta: K8S-01, 02 y 03) | 4, 5, 6 | [run 46181772775](https://github.com/SebaEscobar4/MiniBiblioteca-DevSecOps/actions/runs/46181772775) |
+
+En los tres casos no se construyeron imágenes ni se desplegó nada: `needs` deja los jobs siguientes en *skipped*. En `main`, además, el job de alerta abriría un Issue automáticamente. La versión válida ([run 46181046358](https://github.com/SebaEscobar4/MiniBiblioteca-DevSecOps/actions/runs/46181046358)) pasa todos los jobs.
+
+---
+
+## 8. Incidentes reales durante el desarrollo
+
+| Barrera | Qué pasó | Decisión |
+|---|---|---|
+| SonarQube | El plan gratuito de SonarCloud no permite analizar ramas distintas de `main` ("Organization is not allowed to access data from non main branches") | El análisis corre en PR y en `main`; en ramas de trabajo se omite con un aviso visible. El Quality Gate sigue siendo obligatorio antes del merge |
+| Trivy (imagen) | La imagen `nginx-unprivileged:1.30` (Nginx 1.30.6) tenía 4 CVE críticas; aún no existía la imagen con 1.30.7 | Cambio a `1.31.7-alpine`, que ya trae el parche; se verificó 0 CRITICAL y 0 HIGH |
+| Alertas (local) | Una ráfaga de errores 500 durante 3 minutos disparó `TasaDeErroresAlta` | Comprobado en Prometheus y en el panel "Alertas activas" |
+
+![Alerta disparada en Prometheus](evidencias/ep3/prometheus-alerta-disparada.png)
