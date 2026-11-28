@@ -73,7 +73,10 @@ spec:
               port: http
             periodSeconds: 5
           securityContext:
-            allowPrivilegeEscalation: false
+            # DEMO IE6: configuración insegura (root + privilegiado).
+            runAsUser: 0
+            privileged: true
+            allowPrivilegeEscalation: true
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
