@@ -1,7 +1,9 @@
-# Versión fija de Nginx (rama stable). Variante "unprivileged": corre con
+# Versión fija de Nginx. Se usa la rama 1.31 porque la imagen 1.30 publicada
+# (1.30.6) tiene 4 CVE críticas que Trivy bloqueó (corregidas en 1.31.7).
+# Variante "unprivileged": corre con
 # el usuario nginx (UID 101) y escucha en el puerto 8080, lo que permite
 # aplicar la política de "contenedores sin root" también en Kubernetes.
-FROM nginxinc/nginx-unprivileged:1.30-alpine
+FROM nginxinc/nginx-unprivileged:1.31.7-alpine
 
 ARG APP_VERSION=local
 LABEL org.opencontainers.image.title="minibiblioteca-frontend" \
