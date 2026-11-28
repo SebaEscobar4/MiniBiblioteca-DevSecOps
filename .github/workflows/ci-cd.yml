@@ -260,8 +260,21 @@ jobs:
     name: 3. SonarQube Cloud
     needs: pruebas
     runs-on: ubuntu-latest
+    # El plan gratuito de SonarCloud solo analiza main y los Pull Requests.
+    # En ramas de trabajo (ep3, demo/**) el análisis se omite con un aviso;
+    # el Quality Gate sigue siendo obligatorio en el PR antes del merge.
+    env:
+      ANALIZAR: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/main' }}
 
     steps:
+      - name: Aviso si la rama no se analiza
+        if: env.ANALIZAR != 'true'
+        run: |
+          MSG="SonarQube se omite en la rama $GITHUB_REF_NAME (plan gratuito: solo main y PR). El Quality Gate se exige en el Pull Request."
+          echo "::warning title=SonarQube::$MSG"
+          echo "## SonarQube Cloud" >> "$GITHUB_STEP_SUMMARY"
+          echo "$MSG" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Descargar código
         uses: actions/checkout@v4
         with:
@@ -282,9 +295,11 @@ jobs:
           path: backend/target/site/jacoco/
 
       - name: Compilar clases para el análisis
+        if: env.ANALIZAR == 'true'
         run: mvn -B -f backend/pom.xml -DskipTests package
 
       - name: Validar configuración SonarQube Cloud
+        if: env.ANALIZAR == 'true'
         shell: bash
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
@@ -296,6 +311,7 @@ jobs:
           test -n "$SONAR_ORGANIZATION" || { echo "Falta SONAR_ORGANIZATION"; exit 1; }
 
       - name: Ejecutar SonarQube Cloud y esperar Quality Gate
+        if: env.ANALIZAR == 'true'
         working-directory: backend
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
@@ -316,7 +332,7 @@ jobs:
       # Si SonarQube falla, el motivo queda visible como anotación del run
       # (sin tener que abrir el log completo).
       - name: Mostrar el motivo del fallo de SonarQube
-        if: failure()
+        if: failure() && env.ANALIZAR == 'true'
         working-directory: backend
         run: |
           grep -E "ERROR|QUALITY GATE|Quality Gate|not allowed|branch" sonar.log \
