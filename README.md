@@ -5,6 +5,8 @@ Microservicio académico (Spring Boot 4 + Java 21) con un pipeline CI/CD complet
 > Evaluación Parcial N°2 · DOY0101 Ingeniería DevOps
 > Integrantes: _(nombre 1)_ · _(nombre 2)_
 
+> **EP3 (observabilidad, Kubernetes y cumplimiento):** ver [docs/EP3-observabilidad.md](docs/EP3-observabilidad.md).
+
 ---
 
 ## 1. Arquitectura

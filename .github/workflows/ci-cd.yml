@@ -302,6 +302,7 @@ jobs:
           SONAR_PROJECT_KEY: ${{ vars.SONAR_PROJECT_KEY }}
           SONAR_ORGANIZATION: ${{ vars.SONAR_ORGANIZATION }}
         run: |
+          set -o pipefail
           mvn -B \
             org.sonarsource.scanner.maven:sonar-maven-plugin:5.8.0.7211:sonar \
             -Dsonar.projectKey="$SONAR_PROJECT_KEY" \
@@ -310,7 +311,23 @@ jobs:
             -Dsonar.host.url=https://sonarcloud.io \
             -Dsonar.token="$SONAR_TOKEN" \
             -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml \
-            -Dsonar.qualitygate.wait=true
+            -Dsonar.qualitygate.wait=true 2>&1 | tee sonar.log
+
+      # Si SonarQube falla, el motivo queda visible como anotación del run
+      # (sin tener que abrir el log completo).
+      - name: Mostrar el motivo del fallo de SonarQube
+        if: failure()
+        working-directory: backend
+        run: |
+          grep -E "ERROR|QUALITY GATE|Quality Gate|not allowed|branch" sonar.log \
+            | grep -v "^\[INFO\] Downloading" | tail -n 8 \
+            | while IFS= read -r LINEA; do echo "::error title=SonarQube::${LINEA}"; done
+          {
+            echo "## SonarQube Cloud: motivo del bloqueo"
+            echo '```'
+            grep -E "ERROR|QUALITY GATE|Quality Gate" sonar.log | tail -n 15
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # ==========================================================
   # CI 3 - BUILD DE IMÁGENES Y SMOKE TEST
